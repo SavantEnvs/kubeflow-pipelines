@@ -1,0 +1,15 @@
+# BuildKit prefers <dockerfile>.dockerignore over the context-root .dockerignore.
+# kubeflow/pipelines' root .dockerignore EXCLUDES .git (plus dist / node_modules /
+# various component Dockerfiles). But the commit-image grader AND the air-gapped
+# PATCH re-run need the FULL .git history COPYed into /mayhem (mayhem.yml checks
+# out with fetch-depth 0 for exactly this). So we override here: KEEP .git and the
+# harnessed sources (backend/src/v2/objectstore/config.go for the standalone
+# bucketconfig mini-module; go.mod/go.sum + backend/ for the in-module FuzzExprSelect
+# build of backend/src/v2/expression and its in-tree deps; mayhem/), and only drop
+# the genuinely-heavy build outputs / JS trees that neither build reads.
+**/node_modules
+bower_components
+dist
+frontend/dist
+backend/build
+v2/build

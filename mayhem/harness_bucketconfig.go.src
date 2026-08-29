@@ -1,0 +1,94 @@
+// mayhem/harness_bucketconfig.go.src — native testing.F harness for Kubeflow
+// Pipelines' object-store bucket-URI / pipeline-root parser
+// (backend/src/v2/objectstore/config.go: ParseBucketPathToConfig and friends —
+// the parser that turns a pipeline-root / artifact URI such as
+// "gs://bucket/prefix?query" into a structured {Scheme,BucketName,Prefix,
+// QueryString} Config, plus SplitObjectURI and the S3/GCS session-param
+// decoders).
+//
+// WHY a staged mini-module (netnew §6 Go / port-go): the real kubeflow/pipelines
+// module drags in the FULL Kubernetes api-machinery + gRPC + storage-SDK closure.
+// config.go, though, needs nothing but the stdlib. So mayhem/build.sh copies ONLY
+// that one file (verbatim) into a fresh, standalone Go module at
+// _mayhem_harness/bucketconfig, in its objectstore/ package directory next to
+// this harness and test.sh's KAT probe logic (kat_bucketconfig.go, same package;
+// the probe's entry point FuzzKATBucketConfig is at the end of THIS file, so
+// target and oracle are the same compile of the same config.go package), and runs
+// go-118-fuzz-build from the module root on ./objectstore. The harness module's
+// only non-stdlib dep is the go-118-fuzz-build /testing shim itself.
+//
+// Declared `package objectstore` (the copied file's package) so it reaches the
+// parser directly. Byte-in, NO file I/O (netnew §3). The fuzz argument is a Go
+// string, which the go-118-fuzz-build shim decodes from the input bytes as a
+// 4-byte big-endian length followed by that many bytes (go-fuzz-headers
+// GetString); the committed seeds under mayhem/fuzz_bucketconfig/testsuite/ use
+// that encoding. The harness only drives the library: no timers, no recover(),
+// no input repair, no early return on any input shape.
+package objectstore
+
+import (
+	"strings"
+	"testing"
+)
+
+// harnessParams turns "k=v&k2=v2" into the map[string]string the S3/GCS param
+// decoders take (the shape KFP builds from a provider's session-info params).
+func harnessParams(q string) map[string]string {
+	m := map[string]string{}
+	for _, kv := range strings.Split(q, "&") {
+		if kv == "" {
+			continue
+		}
+		k, v, _ := strings.Cut(kv, "=")
+		m[k] = v
+	}
+	return m
+}
+
+// FuzzBucketConfig drives the object-store URI parsers with an arbitrary string
+// and exercises every accessor on any Config they produce.
+func FuzzBucketConfig(f *testing.F) {
+	f.Add("gs://my-bucket/some/path")
+	f.Add("s3://bkt/obj?region=us-east-1&disableSSL=true")
+	f.Add("minio://mlpipeline/v2/artifacts")
+	f.Add("mem://membucket")
+	f.Add("not-a-uri")
+	f.Add("")
+
+	f.Fuzz(func(t *testing.T, data string) {
+		if c, err := ParseBucketPathToConfig(data); err == nil {
+			_ = c.PrefixedBucket()
+			_ = c.bucketURL()
+			_ = c.SessionInfoPath()
+			_ = c.Hash()
+			if root, err := ParseBucketPathToConfig(c.PrefixedBucket()); err == nil {
+				_ = IsWithinBucketRoot(root, c)
+			}
+			params := harnessParams(strings.TrimPrefix(c.QueryString, "?"))
+			_ = HasStructuredS3Settings(params)
+			_, _ = StructuredS3Params(params)
+			_, _ = StructuredGCSParams(params)
+		}
+		_, _, _ = SplitObjectURI(data)
+		_, _ = ParseProviderFromPath(data)
+	})
+}
+
+// FuzzKATBucketConfig is mayhem/test.sh's known-answer probe entry point, built
+// with -func FuzzKATBucketConfig into /mayhem/kfp_bucketconfig_kat. It is never a
+// Mayhem target and is dead code in /mayhem/fuzz_bucketconfig.
+// It lives in THIS file, next to FuzzBucketConfig, on purpose: go-118-fuzz-build
+// rewrites (and moves aside for the duration of the build) only the ONE file that
+// holds the -func function, compiling every other file of the package as it is on
+// disk. With both entry points in one file, the package built for the graded
+// target and the package built for the probe have the same files with the same
+// contents. The only file that differs is go-118-fuzz-build's generated main
+// (main.*.go, which names the -func function). build.sh deliberately writes it
+// OUTSIDE this package's directory (go-118-fuzz-build runs from the module root on
+// ./objectstore), because a `//go:embed` in config.go would otherwise see the
+// -func-specific main and compile differently in the two builds. So the two
+// packages are the same compile (the second build is a Go build-cache hit). The
+// probe's logic, which only prints computed values, is katRun in kat_bucketconfig.go.
+func FuzzKATBucketConfig(f *testing.F) {
+	f.Fuzz(func(t *testing.T, cases string) { katRun(cases) })
+}

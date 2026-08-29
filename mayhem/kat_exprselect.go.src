@@ -1,0 +1,68 @@
+// mayhem/kat_exprselect.go.src — known-answer probe for Kubeflow Pipelines' CEL expression
+// selector (backend/src/v2/expression: (*Expr).Select).
+//
+// SAME PACKAGE, SAME COMPILE AS THE GRADED TARGET (#1460 A / #1122): mayhem/build.sh stages
+// this file in the SAME package as the fuzz harness (_mayhem_harness/exprselect/, next to
+// harness_exprselect.go, which also holds the probe's entry point FuzzKATExprSelect, so
+// go-118-fuzz-build rewrites the same single file for both builds) and builds
+// /mayhem/kfp_exprselect_kat from that package with the SAME go-118-fuzz-build invocation,
+// module file and clang++ link line as /mayhem/FuzzExprSelect; only -func and the output name
+// differ. Both link the one in-tree expression package (same import path, same compile).
+// This file holds the probe's logic only (no `testing`). mayhem/test.sh runs the probe on ONE
+// input file per case: a go-fuzz-headers
+// string (4-byte big-endian length + bytes) holding "select\t<protobuf.Value as JSON>\t<CEL>".
+// It prints one line of computed values ("ok <result as JSON>" or "err <message>"); test.sh
+// owns every case, expected value and verdict. Dynamically linked (clang++ link).
+package exprselect
+
+import (
+	"encoding/json"
+	"fmt"
+	"strings"
+
+	"github.com/kubeflow/pipelines/backend/src/v2/expression"
+	"google.golang.org/protobuf/types/known/structpb"
+)
+
+// katLine keeps each case's output on ONE line (CEL compile errors carry a
+// multi-line source snippet); newlines are printed as the two characters \n.
+func katLine(s string) string { return strings.ReplaceAll(s, "\n", `\n`) }
+
+func katSelect(line string) string {
+	f := strings.SplitN(line, "\t", 3)
+	if len(f) != 3 || f[0] != "select" {
+		return "badop"
+	}
+	v := &structpb.Value{}
+	if err := v.UnmarshalJSON([]byte(f[1])); err != nil {
+		return "badinput " + katLine(err.Error())
+	}
+	e, err := expression.New()
+	if err != nil {
+		return "err New: " + katLine(err.Error())
+	}
+	got, err := e.Select(v, f[2])
+	if err != nil {
+		return "err " + katLine(err.Error())
+	}
+	if got == nil {
+		return "nilresult"
+	}
+	b, err := json.Marshal(got.AsInterface())
+	if err != nil {
+		return "err marshal: " + katLine(err.Error())
+	}
+	return "ok " + katLine(string(b))
+}
+
+// katSelectRun is the body of the probe entry point FuzzKATExprSelect, which sits in
+// harness_exprselect.go next to FuzzExprSelect (see the note there). It prints one line
+// of computed values per case.
+func katSelectRun(cases string) {
+	for _, line := range strings.Split(cases, "\n") {
+		if line == "" {
+			continue
+		}
+		fmt.Println(katSelect(line))
+	}
+}

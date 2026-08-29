@@ -1,0 +1,150 @@
+// mayhem/kat_bucketconfig.go.src — known-answer probe for Kubeflow Pipelines'
+// object-store bucket-URI parser (backend/src/v2/objectstore/config.go).
+//
+// SAME PACKAGE, SAME COMPILE AS THE GRADED TARGET (the fast_rsync #1122 pattern,
+// #1460 A): mayhem/build.sh stages this file IN THE SAME directory and Go package
+// as the fuzz harness (_mayhem_harness/bucketconfig/objectstore, import path
+// github.com/kubeflow/pipelines/_mayhem_harness/bucketconfig/objectstore, next to
+// ONE verbatim copy of config.go), and the probe's entry point FuzzKATBucketConfig sits in
+// harness_bucketconfig.go next to FuzzBucketConfig. go-118-fuzz-build rewrites and
+// moves aside only the file holding -func, which is the same file for both, so
+// /mayhem/kfp_bucketconfig_kat and /mayhem/fuzz_bucketconfig are built from the
+// same package files with the same contents, by the SAME `go-118-fuzz-build`
+// invocation (build tags gofuzz_libfuzzer,libfuzzer, -trimpath, -gcflags
+// all=-d=libfuzzer, c-archive, same CGO_CFLAGS) and the SAME clang++ link line.
+// Only -func, the output name and go-118-fuzz-build's generated main.*.go (which
+// names the -func function) differ. That generated main is deliberately placed
+// OUTSIDE the package directory: go-118-fuzz-build runs from the mini-module root on
+// ./objectstore, because a `//go:embed` in config.go would otherwise see the
+// -func-specific main. So build tags, `#cgo` flags, ${SRCDIR} / __has_include, the
+// package's file set, the files it can embed and reflect PkgPath are the same for
+// the probe and the graded target, and code that a patch compiles into the fuzz
+// build lands in this probe too, where mayhem/test.sh sees it. This file holds the
+// probe's logic only (no `testing`).
+//
+// The probe is a libFuzzer binary that mayhem/test.sh runs on ONE input file
+// (libFuzzer's run-the-given-files mode). The input is a go-fuzz-headers string
+// (4-byte big-endian length + bytes, the encoding the shim's f.Fuzz decodes):
+// newline-separated cases, each "<op>\t<arg>[\t<arg2>]" (s3/gcs take a bucket URI whose
+// query string carries the session params, as in the fuzz harness). For every case the probe
+// prints ONE line with the values the library computed. mayhem/test.sh owns the
+// cases and the expected lines, and makes every pass/fail decision itself; this
+// file prints values only (no verdicts, no tallies). It is dynamically linked
+// (clang++ link), so the gate's LD_PRELOAD neuter silences it.
+package objectstore
+
+import (
+	"fmt"
+	"strings"
+)
+
+func katParams(q string) map[string]string {
+	m := map[string]string{}
+	for _, kv := range strings.Split(q, "&") {
+		if kv == "" {
+			continue
+		}
+		k, v, _ := strings.Cut(kv, "=")
+		m[k] = v
+	}
+	return m
+}
+
+// katLine keeps each case's output on ONE line; newlines print as the two characters \n.
+func katLine(s string) string { return strings.ReplaceAll(s, "\n", `\n`) }
+
+func katParse(uri string) string {
+	c, err := ParseBucketPathToConfig(uri)
+	if err != nil {
+		return "err " + err.Error()
+	}
+	if c == nil {
+		return "nilconfig"
+	}
+	return fmt.Sprintf("ok scheme=%s bucket=%s prefix=%s query=%s prefixed=%s bucketurl=%s sessionpath=%s hash=%s",
+		c.Scheme, c.BucketName, c.Prefix, c.QueryString, c.PrefixedBucket(), c.bucketURL(), c.SessionInfoPath(), c.Hash())
+}
+
+func katCase(line string) string {
+	f := strings.Split(line, "\t")
+	arg := func(i int) string {
+		if i < len(f) {
+			return f[i]
+		}
+		return ""
+	}
+	switch f[0] {
+	case "parse":
+		return katParse(arg(1))
+	case "hashne":
+		a, errA := ParseBucketPathToConfig(arg(1))
+		b, errB := ParseBucketPathToConfig(arg(2))
+		if errA != nil || errB != nil || a == nil || b == nil {
+			return "err"
+		}
+		if a.Hash() != b.Hash() {
+			return "distinct"
+		}
+		return "same"
+	case "split":
+		prefix, base, err := SplitObjectURI(arg(1))
+		if err != nil {
+			return "err " + err.Error()
+		}
+		return fmt.Sprintf("ok prefix=%s base=%s", prefix, base)
+	case "provider":
+		p, err := ParseProviderFromPath(arg(1))
+		if err != nil {
+			return "err " + err.Error()
+		}
+		return "ok " + p
+	case "within":
+		root, _ := ParseBucketPathToConfig(arg(1))
+		cand, _ := ParseBucketPathToConfig(arg(2))
+		return fmt.Sprintf("%t", IsWithinBucketRoot(root, cand))
+	case "s3", "gcs":
+		// Same flow as the fuzz harness: parse the bucket URI, then decode the
+		// session params from its query string ("?k=v&k2=v2").
+		c, err := ParseBucketPathToConfig(arg(1))
+		if err != nil {
+			return "err parse " + err.Error()
+		}
+		if c == nil {
+			return "nilconfig"
+		}
+		p := katParams(strings.TrimPrefix(c.QueryString, "?"))
+		if f[0] == "gcs" {
+			g, err := StructuredGCSParams(p)
+			if err != nil {
+				return "err " + err.Error()
+			}
+			if g == nil {
+				return "nilparams"
+			}
+			return fmt.Sprintf("ok fromEnv=%t secretName=%s tokenKey=%s", g.FromEnv, g.SecretName, g.TokenKey)
+		}
+		has := HasStructuredS3Settings(p)
+		s, err := StructuredS3Params(p)
+		if err != nil {
+			return fmt.Sprintf("has=%t err %s", has, err.Error())
+		}
+		if s == nil {
+			return fmt.Sprintf("has=%t nilparams", has)
+		}
+		return fmt.Sprintf("has=%t ok fromEnv=%t secretName=%s accessKeyKey=%s secretKeyKey=%s region=%s endpoint=%s disableSSL=%t forcePathStyle=%t maxRetries=%d",
+			has, s.FromEnv, s.SecretName, s.AccessKeyKey, s.SecretKeyKey, s.Region, s.Endpoint, s.DisableSSL, s.ForcePathStyle, s.MaxRetries)
+	}
+	return "badop"
+}
+
+// katRun is the body of the probe entry point FuzzKATBucketConfig, which sits in
+// harness_bucketconfig.go next to FuzzBucketConfig (see the note there). It
+// prints one line of computed values per case.
+func katRun(cases string) {
+	for _, line := range strings.Split(cases, "\n") {
+		if line == "" {
+			continue
+		}
+		fmt.Println(katLine(katCase(line)))
+	}
+}

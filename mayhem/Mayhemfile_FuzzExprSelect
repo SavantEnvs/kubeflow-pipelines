@@ -1,0 +1,8 @@
+project: savantenvs/kubeflow-pipelines
+target: FuzzExprSelect
+testsuite:
+  - https://$MAYHEM_DOMAIN/$MAYHEM_PROJECT/$MAYHEM_TARGET/testsuite.tar
+  - file://mayhem/FuzzExprSelect/testsuite
+cmds:
+  - cmd: /mayhem/FuzzExprSelect
+    libfuzzer: true

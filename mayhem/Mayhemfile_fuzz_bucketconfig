@@ -1,0 +1,8 @@
+project: savantenvs/kubeflow-pipelines
+target: fuzz_bucketconfig
+testsuite:
+  - https://$MAYHEM_DOMAIN/$MAYHEM_PROJECT/$MAYHEM_TARGET/testsuite.tar
+  - file://mayhem/fuzz_bucketconfig/testsuite
+cmds:
+  - cmd: /mayhem/fuzz_bucketconfig
+    libfuzzer: true
